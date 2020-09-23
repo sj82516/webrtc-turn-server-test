@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webrtc demo</title>
+    <style>
+        .container {
+            display: flex;
+        }
+
+        .stream-container {
+            flex: 2;
+        }
+
+        .panel {
+            flex: 1;
+        }
+
+        .stream {
+            position: relative;
+            display: inline-block;
+        }
+
+        .tag {
+            position: absolute;
+            top: 0;
+            right: 0;
+            background: orange;
+            width: 140px;
+            height: 30px;
+            color: white !important;
+            text-align: center;
+            line-height: 30px;
+            font-size: 20px;
+        }
+
+        .setting {
+            margin-bottom: 10px;
+        }
+
+        .setting_title {
+            width: 100px;
+            display: inline-block;
+        }
+
+        .setting_input {
+            width: 300px;
+            display: inline-block;
+            height: 30px;
+        }
+
+        #submit {
+            background-color: #d84a38;
+            border: none;
+            border-radius: 2px;
+            color: white;
+            font-family: 'Roboto', sans-serif;
+            font-size: 0.8em;
+            margin: 0 0 1em 0;
+            padding: 0.5em 0.7em 0.6em 0.7em;
+            width: 380px;
+            font-size: 16px;
+            margin-top: 10px;
+            margin-left: 20px;
+        }
+
+        .info__content {
+            border: 1px solid gray;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Webrtc Demo: Connection through self-hosted TURN server</h1>
+    <h2>This is for testing self-hosted TURN server. Key in your TURN server and auth method. We will generate ICE list
+        and try to establish relay only Webrtc connection</h2>
+    <div class="container">
+        <div class="stream-container">
+            <div class="stream">
+                <p class="tag">source</p>
+                <video muted autoplay loop src="/media/sample.mp4" id="source" width="400px" height="300px"></video>
+            </div>
+            <div class="stream">
+                <p class="tag">destination</p>
+                <video muted autoplay loop id="dest" width="400px" height="300px"></video>
+            </div>
+        </div>
+        <div class="panel">
+            <h2> TURN Server setting </h2>
+            <div class="setting">
+                <label class="setting_title">host</label>
+                <input id="host" type="url" class="setting_input" />
+            </div>
+            <div class="setting">
+                <label class="setting_title">auth type</label>
+                <select id="auth" class="setting_input">
+                    <option value="lt-cred">long term credential</option>
+                    <option value="st-cred">short term credential</option>
+                    <option value="no-auth">no auth</option>
+                </select>
+            </div>
+            <div class="setting">
+                <label class="setting_title">username</label>
+                <input class="setting_input" id="username" type="text" placeholder="username" />
+            </div>
+            <div class="setting">
+                <label class="setting_title" class="setting_title">secret</label>
+                <input class="setting_input" id="credential" type="text"
+                    placeholder="password (long term) or shared secret (short term)" />
+            </div>
+
+            <button id="submit">Start</button>
+
+            <div class="info">
+                <p class="info__title">ICE Server List</p>
+                <pre id="ice-list" class="info__content prettyprint"></pre>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsSHA/3.1.2/sha.js"
+        integrity="sha512-H2dtmDos4UMqJa28vmoUWGKjQ5mvlyA6vN4J9u4PH8HCJ4aCIst9pzEbzoSwcSAjM5jtgz9+ayDR2Z8gu2vHTg=="
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/gh/google/code-prettify@master/loader/run_prettify.js"></script>
+
+    <script>
+        const prevConfig = readSetting();
+        if (prevConfig) {
+            const hostEle = document.getElementById("host");
+            const authEle = document.getElementById("auth");
+            const usernameEle = document.getElementById("username");
+            const credentialEle = document.getElementById("credential");
+
+            hostEle.value = prevConfig.host;
+            authEle.value = prevConfig.auth;
+            usernameEle.value = prevConfig.username;
+            credentialEle.value = prevConfig.credential;
+        }
+
+        const submitEle = document.getElementById("submit");
+
+        submitEle.addEventListener('click', async () => {
+            const iceServers = generateIceList();
+            const iceListEle = document.getElementById("ice-list");
+            iceListEle.innerText = JSON.stringify(iceServers, null, 4);
+
+            await establishConnection(iceServers);
+        })
+        function generateIceList() {
+            const hostEle = document.getElementById("host");
+            const authEle = document.getElementById("auth");
+            const usernameEle = document.getElementById("username");
+            const credentialEle = document.getElementById("credential");
+
+            const host = hostEle.value;
+            const auth = authEle.value;
+
+            let username = usernameEle.value;
+            let credential = credentialEle.value;
+
+            if (!host) {
+                return alert("No host");
+            }
+            if (auth !== 'no-auth' && (username === '' || credential === '')) {
+                return alert("Please key in username and credential");
+            }
+
+            saveSetting({
+                host,
+                auth,
+                username,
+                credential,
+            })
+
+            if (auth === 'st-cred') {
+                ({ username, credential } = getTURNCredentials(username, credential));
+            }
+
+            const iceList = [{
+                urls: `stun:${host}`,
+                username,
+                credential
+            }, {
+                urls: `turn:${host}`,
+                username,
+                credential
+            }]
+            return iceList;
+        }
+        function getTURNCredentials(name, secret) {
+            var unixTimeStamp = parseInt(Date.now() / 1000) + 24 * 3600,   // this credential would be valid for the next 24 hours
+                username = [unixTimeStamp, name].join(':'),
+                password;
+            const shaObj = new jsSHA("SHA-1", "TEXT", {
+                hmacKey: { value: secret, format: "TEXT" },
+            });
+            shaObj.update(username);
+            const hmac = shaObj.getHash("B64");
+            return {
+                username: username,
+                credential: hmac
+            };
+        }
+
+        async function establishConnection(iceServers) {
+            const pc1 = new RTCPeerConnection({
+                iceServers,
+                iceTransportPolicy: 'relay'
+            })
+            const pc2 = new RTCPeerConnection({
+                iceServers,
+                iceTransportPolicy: 'relay'
+            })
+            pc1.onicecandidate = async e => {
+                if (!e.candidate) return;
+                await pc2.addIceCandidate(e.candidate);
+            };
+            pc2.onicecandidate = async e => {
+                if (!e.candidate) return;
+                await pc1.addIceCandidate(e.candidate);
+            };
+
+            pc2.ontrack = (event) => {
+                const destEle = document.getElementById("dest");
+                if (event.track.kind === 'video') {
+                    destEle.srcObject = event.streams[0];
+                }
+            };
+
+            const sourceEle = document.getElementById("source");
+            const stream = sourceEle.captureStream();
+            stream.getTracks().forEach(track => {
+                pc1.addTrack(track, stream)
+            });
+
+            const offer = await pc1.createOffer({
+                offerToReceiveAudio: 1,
+                offerToReceiveVideo: 1
+            });
+
+            await pc1.setLocalDescription(offer);
+            await pc2.setRemoteDescription(offer);
+
+            const answer = await pc2.createAnswer();
+            await pc1.setRemoteDescription(answer);
+            await pc2.setLocalDescription(answer);
+        }
+
+        // for convenience, save config to local storage
+        const storageKey = "webrtc-demo";
+        function readSetting() {
+            const result = localStorage.getItem("webrtc-demo");
+            if (result) {
+                return JSON.parse(result);
+            }
+            return null;
+        }
+        function saveSetting({
+            host,
+            auth,
+            username,
+            credential,
+        }) {
+            localStorage.setItem("webrtc-demo", JSON.stringify({
+                host,
+                auth,
+                username,
+                credential,
+            }));
+        }
+    </script>
+</body>
+
+</html>
